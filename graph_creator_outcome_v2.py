@@ -7,6 +7,18 @@ import numpy as np
 from torch_geometric.data import HeteroData
 from tqdm import tqdm
 import math
+
+OUTCOME_COLUMNS = [
+    'DE',
+    'LT',
+    'HO',
+    'DS',
+    'CA',
+    'RI',
+    'OT'
+]
+
+
 def bidirectional_maker(edge):
     orig_edge = edge
     rev_edge = edge.flip(0)
@@ -59,6 +71,55 @@ def main():
     # smile_df contains the SMILE string for each cid
     smile_df = pd.read_csv(smile_string_file)
 
+    missing_columns = [
+        col for col in OUTCOME_COLUMNS
+        if col not in demo.columns
+    ]
+
+    if missing_columns:
+        raise ValueError(
+            f"Missing outcome columns: {missing_columns}"
+        )
+
+    if 'has_outcome_label' in demo.columns:
+        demo = demo.loc[
+            demo['has_outcome_label'].fillna(False).astype(bool)
+        ].copy()
+
+    for col in OUTCOME_COLUMNS:
+        demo[col] = pd.to_numeric(
+            demo[col],
+            errors='coerce'
+        )
+
+    valid_target_mask = demo[OUTCOME_COLUMNS].notna().all(axis=1)
+
+    num_missing = int((~valid_target_mask).sum())
+
+    if num_missing:
+        print(
+            f"Dropping {num_missing} patients with missing outcome labels"
+        )
+
+        demo = demo.loc[valid_target_mask].copy()
+
+    valid_patient_ids = set(demo['primaryid'])
+
+    drug_df = drug_df.loc[
+        drug_df['primaryid'].isin(valid_patient_ids)
+    ].copy()
+
+    demo[OUTCOME_COLUMNS] = (
+        demo[OUTCOME_COLUMNS]
+        .astype(float)
+    )
+
+    print("Outcome positive counts:")
+    print(
+        demo[OUTCOME_COLUMNS]
+        .sum()
+        .astype(int)
+    )
 
     # Prepare for embedding
     emb_map = torch.load(Path(cwd, 'output_csv', 'pre-embeddings', 'pre_embeddings.pt'))
@@ -72,11 +133,6 @@ def main():
     prod_ai_tensor = torch.stack(list(emb_map['chemical'].values()))
     prod_ai_map = {p:i for i,p in enumerate(emb_map['chemical'].keys())}
     prod_ai_emb = nn.Embedding.from_pretrained(prod_ai_tensor, freeze=False)
-
-    # pt
-    pt_tensor = torch.stack(list(emb_map['pt'].values()))
-    pt_map = {p:i for i,p in enumerate(emb_map['pt'].keys())}
-    pt_emb = nn.Embedding.from_pretrained(pt_tensor, freeze=False)
 
     # disease class
     disease_tensor = torch.stack(list(emb_map['disease_class'].values()))
@@ -120,11 +176,6 @@ def main():
     drug_df['start_dt'] = pd.to_datetime(drug_df['start_dt'])
     drug_df['end_dt'] = pd.to_datetime(drug_df['end_dt'])
     drug_df['duration_days'] = (drug_df['end_dt'] - drug_df['start_dt']).dt.days
-
-    #rept_cod
-    demo['rept_cod'] = demo['rept_cod'].fillna('UNKNOWN')
-    rept_map = {r:i for i,r in enumerate(demo['rept_cod'].unique())}
-
 
     # sex
     valid_sex = {'F', 'M', 'UNK'}
@@ -193,10 +244,6 @@ def main():
 
     indi_pt_link_map = {
         ip: i for i, ip in enumerate(emb_map['indi_pt'].keys())
-    }
-
-    pt_link_map = {
-        p: i for i, p in enumerate(emb_map['pt'].keys())
     }
 
     disease_link_map = {
@@ -276,10 +323,14 @@ def main():
     ], dim=1)
 
     # create edge_index
-    demo_to_drug_edge = torch.tensor([
-        drug_df['demo_idx'].values,
-        drug_df['drug_idx'].values
-    ], dtype=torch.long)
+    # Stack into one NumPy array first to avoid PyTorch's slow list-of-arrays path.
+    demo_to_drug_edge = torch.tensor(
+        np.stack([
+            drug_df['demo_idx'].to_numpy(),
+            drug_df['drug_idx'].to_numpy()
+        ], axis=0),
+        dtype=torch.long
+    )
 
     print('finished demo to drug')
     print(len(drug_df['demo_idx'].values))
@@ -352,21 +403,6 @@ def main():
     print('finished chemical')
     print(len(src))
 
-    # Edge links between demo and pt
-    demo['pt_2'] = demo['pt_2'].str.split(',')
-    demo_to_pt_src = []
-    demo_to_pt_dest = []
-    test_df = demo.explode('pt_2')[['primaryid', 'pt_2']]
-    test_df['pt_2'] = test_df['pt_2'].apply(norm_text)
-    for _,row in test_df.iterrows():
-        demo_to_pt_src.append(demo_link_map[row['primaryid']])
-        demo_to_pt_dest.append(pt_link_map[row['pt_2']])
-    demo_to_pt_edge = torch.tensor([demo_to_pt_src,
-                                    demo_to_pt_dest],
-                                   dtype=torch.long)
-    print('finished demo to pt')
-    print(len(demo_to_pt_src))
-
     # Edge links between chemicals and disease type
     chem_to_disease_src = []
     chem_to_disease_dest = []
@@ -394,25 +430,6 @@ def main():
                                         dtype=torch.long)
     print('finished chemical to disease')
     print(len(chem_to_disease_src))
-
-    # Edge links between pt and disease type
-    pt_to_disease_src = []
-    pt_to_disease_dest = []
-    disease_df['Side Effect Name'] = disease_df['Side Effect Name'].str.strip()
-    side_effect_names = set(disease_df['Side Effect Name'])
-    for pt in pt_link_map.keys():
-        pt_mask = pt.lower().strip()
-        if pt_mask in side_effect_names:
-            disease_cat = disease_df.loc[disease_df['Side Effect Name'] == pt_mask, 'Disease Class'].values[0]
-            pt_to_disease_src.append(pt_link_map[pt])
-            pt_to_disease_dest.append(disease_link_map[disease_cat])
-        else:
-            continue
-    pt_to_disease_edge = torch.tensor([pt_to_disease_src,
-                                       pt_to_disease_dest],
-                                      dtype=torch.long)
-    print('finished pt to disease')
-    print(len(pt_to_disease_src))
 
     # Edge links between drug and indi_pt
     drug_to_indi_pt_src = []
@@ -460,33 +477,51 @@ def main():
                 smile = smiles.values[0]
                 fingerprint_idx = smile_map[smile]
                 fingerprint_emb = smile_emb(torch.tensor([fingerprint_idx])).squeeze(0)
-            mono_effects = mono_df.loc[mono_df['STITCH'] ==chem_cid, 'Side Effect Name'].tolist()
-            indices = torch.tensor([side_effect_map[mon] for mon in mono_effects], dtype=torch.long)
-            mono_effects_emb = side_effect_emb(indices).mean(dim=0)
+            mono_effects = mono_df.loc[mono_df['STITCH'] == chem_cid, 'Side Effect Name'].tolist()
+            indices = torch.tensor(
+                [
+                    side_effect_map[mon]
+                    for mon in mono_effects
+                    if mon in side_effect_map
+                ],
+                dtype=torch.long
+            )
+
+            if indices.numel() == 0:
+                mono_effects_emb = torch.zeros(768)
+            else:
+                mono_effects_emb = side_effect_emb(indices).mean(dim=0)
 
         chemical_features.append(torch.cat([
             name_emb, fingerprint_emb, mono_effects_emb], dim=0))
     data['chemical'].x = torch.stack(chemical_features)
     print('finished chemical features')
 
-    # patient nodes (keep as indexes since features should be trainable)
+    # patient nodes
     # Map categorical columns to indices directly
-    rept_idx = demo['rept_cod'].map(rept_map).values
     mfr_idx = demo['mfr_sndr'].map(mfr_sndr_map).values
     occr_idx = demo['occr_country'].map(occr_map).values
     sex_idx = demo['sex'].map(sex_map).values
     # Stack categorical indices into a tensor
     patient_indexes = torch.tensor(
-        np.stack([rept_idx, mfr_idx, occr_idx, sex_idx], axis=1),
+        np.stack([mfr_idx, occr_idx, sex_idx], axis=1),
         dtype=torch.long
     )
-    # Numerical features (already vectors, no loop needed)
+    # Numerical features
     patient_num = torch.tensor(
         demo[['event_year', 'age_years']].values,
         dtype=torch.float
     )
     data['patient'].cat_index = patient_indexes
     data['patient'].numerical = patient_num
+
+    # Most serious outcome target
+    data['patient'].y = torch.tensor(
+        demo[OUTCOME_COLUMNS].to_numpy(),
+        dtype=torch.float
+    )
+
+    data['patient'].num_nodes = len(demo) # prevents num_nodes = none
     print("finished patient features")
 
     # Drug nodes
@@ -512,17 +547,6 @@ def main():
     data['indi_pt'].x = torch.stack(indi_pt_features)
     print('finished indi_pt features')
 
-    # Pt nodes
-    pt_features = []
-    for pt in emb_map['pt'].keys():
-        pt_idx = pt_map[pt]
-        pt_vec = pt_emb(torch.tensor([pt_idx])).squeeze(0)
-
-        pt_features.append(torch.cat([
-            pt_vec,
-        ]))
-    data['pt'].x = torch.stack(pt_features)
-
     # Disease nodes
     disease_features = []
     for disease in emb_map['disease_class'].keys():
@@ -534,7 +558,7 @@ def main():
         ]))
     data['disease_class'].x = torch.stack(disease_features)
 
-    # Gene nodes keep as ids (want to train embeddings)
+    # Gene nodes keep as id
     gene_index = [gene_link_map[gene] for gene in genes_df['Genes']]
     data['gene'].x = torch.tensor(gene_index)
 
@@ -555,8 +579,6 @@ def main():
     data['chemical', 'rev_targets', 'drugs'].edge_index = drug_to_chem_edge.flip(0)
     data['gene', 'targets', 'gene'].edge_index = gene_to_gene_edge
     data['gene', 'rev_targets', 'gene'].edge_index = gene_to_gene_edge.flip(0)
-    data['pt', 'targets', 'disease_class'].edge_index = pt_to_disease_edge
-    data['patient', 'targets', 'pt'].edge_index = demo_to_pt_edge
 
     torch.save(data, cwd / "output_csv" / "graph_data" / "graph_data.pt")
 
