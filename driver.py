@@ -4,9 +4,9 @@ import data_extract
 import drug_therapy_cleaner
 import side_effect_list
 import stitch_id_attacher
-import pre_embedder
+
 import whole_db_merger
-import demo_merger
+import demo_merger_multilabel_outcomes
 import demo_cleaner
 import smiles_attacher
 import gene_list
@@ -30,7 +30,7 @@ def main():
     #input_csv_folder = Path(cwd, 'input_csv')
     #cleaned_files = Path(cwd, 'output_csv', f'cleaner_out')
     #for folder, file in zip(input_csv_folder.iterdir(), cleaned_files.iterdir()):
-    #    demo_merger.main(folder, file)
+    #    demo_merger_multilabel_outcomes.main(folder, file)
 
     # Quarters merger
     #whole_db_merger.main()
@@ -53,7 +53,7 @@ def main():
     bio_side_effects = cwd / 'bio-decagon_folders' / 'bio-decagon-side_effects.csv'
     bio_effect_cat = cwd / 'bio-decagon_folders' / 'bio-decagon-effectcategories.csv'
     smile_file = cwd / 'output_csv' / 'cid_smile' / 'cid_smile.csv'
-    pre_embedder.main(drug, demo, bio_side_effects, bio_effect_cat, smile_file)
+    #pre_embedder.main(drug, demo, bio_side_effects, bio_effect_cat, smile_file)
 
     # GNN creator
 
